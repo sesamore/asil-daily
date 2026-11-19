@@ -1,0 +1,110 @@
+name: 관심부동산 일일 수집
+
+on:
+  schedule:
+    - cron: '50 13 * * *'   # 22:50 KST
+    - cron: '25 14 * * *'   # 23:25 KST 재시도 (그날 결과가 있으면 건너뜀)
+  workflow_dispatch:
+    inputs:
+      date:
+        description: '기준일 YYYY-MM-DD (비우면 오늘 KST, 06시 전이면 전날)'
+        required: false
+        default: ''
+      force:
+        description: '이미 있는 기준일도 다시 수집해 덮어쓰기'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: asil-daily
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      TZ: Asia/Seoul
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 기준일 결정
+        id: d
+        run: |
+          if [ -n "${{ inputs.date }}" ]; then D="${{ inputs.date }}"
+          elif [ "$(date +%H)" -lt 6 ]; then D=$(date -d yesterday +%F)
+          else D=$(date +%F); fi
+          echo "date=$D" >> "$GITHUB_OUTPUT"
+          echo "ymd=${D//-/}" >> "$GITHUB_OUTPUT"
+          if [ -f "data/groups/groups_$D.txt" ] && [ "${{ inputs.force }}" != "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "$D 결과가 이미 있어 건너뜁니다." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.d.outputs.skip == 'false'
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-python@v5
+        if: steps.d.outputs.skip == 'false'
+        with:
+          python-version: '3.12'
+
+      - name: 파이썬 패키지
+        if: steps.d.outputs.skip == 'false'
+        run: pip install openpyxl
+
+      - name: 아실 매물 수집
+        if: steps.d.outputs.skip == 'false'
+        run: |
+          mkdir -p data/groups
+          node collector/collect.mjs "data/groups/groups_${{ steps.d.outputs.date }}.txt"
+
+      - name: 엑셀·호가이력 빌드
+        if: steps.d.outputs.skip == 'false'
+        run: |
+          D="${{ steps.d.outputs.date }}"
+          LABEL="$(date '+%Y-%m-%d %H:%M') KST / 아실(asil.kr) GitHub Actions"
+          mkdir -p out
+          python pipeline/build_daily.py data/template.xlsx "data/groups/groups_$D.txt" data/history.tsv "$D" "$LABEL" \
+            "out/관심부동산_${{ steps.d.outputs.ymd }}.xlsx" out/history.tsv
+          mv out/history.tsv data/history.tsv
+          cp "out/관심부동산_${{ steps.d.outputs.ymd }}.xlsx.summary.json" data/latest.json
+
+      - name: 전일 대비 분석
+        if: steps.d.outputs.skip == 'false'
+        run: |
+          mkdir -p data/reports
+          python pipeline/diff_report.py data/history.tsv "${{ steps.d.outputs.date }}" "data/reports/${{ steps.d.outputs.date }}.md"
+          cat "data/reports/${{ steps.d.outputs.date }}.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 저장소에 결과 저장
+        if: steps.d.outputs.skip == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data
+          git commit -m "수집 ${{ steps.d.outputs.date }}" || echo "변경 없음"
+          git pull --rebase origin main
+          git push origin HEAD:main
+
+      - name: 릴리스에 엑셀 첨부
+        if: steps.d.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="d-${{ steps.d.outputs.date }}"
+          F="out/관심부동산_${{ steps.d.outputs.ymd }}.xlsx"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$F" --clobber
+            gh release edit "$TAG" --notes-file "data/reports/${{ steps.d.outputs.date }}.md"
+          else
+            gh release create "$TAG" "$F" --title "관심부동산 ${{ steps.d.outputs.date }}" \
+              --notes-file "data/reports/${{ steps.d.outputs.date }}.md"
+          fi
