@@ -39,7 +39,7 @@ jobs:
           else D=$(date +%F); fi
           echo "date=$D" >> "$GITHUB_OUTPUT"
           echo "ymd=${D//-/}" >> "$GITHUB_OUTPUT"
-          if [ -f "data/groups/groups_$D.txt" ] && [ "${{ inputs.force }}" != "true" ]; then
+          if [ -f "data/groups/groups_$D.txt" ] && { [ "${{ github.event.schedule }}" = "25 14 * * *" ] || { [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" != "true" ]; }; }; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "$D 결과가 이미 있어 건너뜁니다." | tee -a "$GITHUB_STEP_SUMMARY"
           else
