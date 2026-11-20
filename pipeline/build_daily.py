@@ -3,7 +3,7 @@
 # 사용법: python3 build_daily.py TEMPLATE.xlsx GROUPS.txt HISTORY_IN.tsv YYYY-MM-DD "수집시각/출처" OUT.xlsx HISTORY_OUT.tsv
 #  - GROUPS.txt : collect.js의 __show 출력(파이프 구분 19열, 1행=단지×전용 그룹)
 #  - HISTORY.tsv: 호가이력 누적본(헤더 포함, 탭 구분). 같은 기준일 행은 교체
-import sys, re, copy, csv, datetime
+import sys, re, copy, csv, datetime, glob, os
 import openpyxl
 from openpyxl.comments import Comment
 from openpyxl.styles import Font, Alignment, Border, Side
@@ -84,19 +84,32 @@ def floor_txt(d):
     return f"{dong} {d['flr']}층/{d['tflr']}층".strip()
 
 # ---------- 호가이력 누적 ----------
-HH = ['기준일', '수집시각/출처', '구', '동', '급지', '단지키', '아파트명', '전용㎡', '공급평형', '매물수(건)', '최저호가', '평균호가', '최고호가', '최저호가 동/층', '최저호가매물 특징', '최저호가 등록일']
+HH = ['기준일', '수집시각/출처', '구', '동', '급지', '단지키', '아파트명', '전용㎡', '공급평형', '매물수(건)', '최저호가', '평균호가', '최고호가', '최저호가 동/층', '최저호가매물 특징', '최저호가 등록일', '세대수']
+# 단지키 → 세대수 (예전 이력 행에 세대수가 없으면 groups 원본 파일로 채움. 기존 열 위치는 그대로 두고 맨 끝에 추가)
+hh_map = {}
+for gf in sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(RAW)), 'groups_*.txt'))):
+    for line in open(gf, encoding='utf-8'):
+        p = line.rstrip('\n').split('|')
+        if len(p) != 19: continue
+        try: hh_map[f"{p[2]}_{round(float(p[6]))}"] = int(p[4].replace(',', '') or 0)
+        except ValueError: pass
+for d in rows:
+    hh_map[key(d)] = d['hh']
 hist = []
 with open(HIN, encoding='utf-8') as f:
     r = csv.reader(f, delimiter='\t')
     next(r)
     for row in r:
         if row and row[0] != DATE:
+            row = (row + [''] * len(HH))[:len(HH)]
+            if row[16] == '' and row[5] in hh_map:
+                row[16] = str(hh_map[row[5]])
             hist.append(row)
 prev_dates = sorted({row[0] for row in hist})
 prev_keys = {row[5] for row in hist if prev_dates and row[0] == prev_dates[-1]}
 for d in kept:
     hist.append([DATE, LABEL, d['gu'], d['dn'], str(d['tier']), key(d), d['apt'], f"{d['ex']:.2f}", str(round(d['sp'] / 3.3058)),
-                 str(d['cnt']), f"{d['minp']/10000:g}", f"{d['avg']/10000:.2f}", f"{d['maxp']/10000:g}", floor_txt(d), d['desc'], d['date']])
+                 str(d['cnt']), f"{d['minp']/10000:g}", f"{d['avg']/10000:.2f}", f"{d['maxp']/10000:g}", floor_txt(d), d['desc'], d['date'], str(d['hh'])])
 hist.sort(key=lambda x: x[0])
 with open(HOUT, 'w', encoding='utf-8', newline='') as f:
     w = csv.writer(f, delimiter='\t', lineterminator='\n')
@@ -157,7 +170,11 @@ thin = Side(style='thin', color='FFBFBFBF')
 bd = Border(left=thin, right=thin, top=thin, bottom=thin)
 hs = wb['호가이력']
 hs.delete_rows(2, hs.max_row)
-num_cols = {5: float, 8: float, 9: int, 10: int, 11: float, 12: float, 13: float}
+num_cols = {5: float, 8: float, 9: int, 10: int, 11: float, 12: float, 13: float, 17: int}
+for c in range(1, len(HH) + 1):  # 템플릿에 없는 새 머리글(세대수)은 앞 열 서식을 복사
+    if hs.cell(1, c).value is None:
+        hs.cell(1, c, HH[c - 1])._style = copy.copy(hs.cell(1, c - 1)._style)
+        hs.column_dimensions[get_column_letter(c)].width = 9
 for i, row in enumerate(hist, start=2):
     for c, val in enumerate(row, 1):
         if c == 1:
@@ -169,7 +186,8 @@ for i, row in enumerate(hist, start=2):
     hs.cell(i, 1).number_format = 'yyyy-mm-dd'
     for c in (11, 12, 13):
         hs.cell(i, c).number_format = '0.00'
-hs.auto_filter.ref = f'A1:P{len(hist) + 1}'
+    hs.cell(i, 17).number_format = '#,##0'
+hs.auto_filter.ref = f'A1:{get_column_letter(len(HH))}{len(hist) + 1}'
 
 xs = wb['제외매물']
 xs.delete_rows(2, xs.max_row)
