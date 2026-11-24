@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       date:
-        description: '기준일 YYYY-MM-DD (비우면 오늘 KST, 06시 전이면 전날)'
+        description: '기준일 2026-11-23 (비우면 오늘 KST, 06시 전이면 전날)'
         required: false
         default: ''
       force:
