@@ -2,8 +2,10 @@ name: 관심부동산 일일 수집
 
 on:
   schedule:
-    - cron: '50 13 * * *'   # 22:50 KST
+    - cron: '50 13 * * *'   # 22:50 KST 본 실행
     - cron: '25 14 * * *'   # 23:25 KST 재시도 (그날 결과가 있으면 건너뜀)
+    - cron: '17 16 * * *'   # 01:17 KST 재시도 (전날 기준일, 결과가 있으면 건너뜀)
+    - cron: '43 18 * * *'   # 03:43 KST 재시도 (전날 기준일, 결과가 있으면 건너뜀)
   workflow_dispatch:
     inputs:
       date:
@@ -34,12 +36,17 @@ jobs:
       - name: 기준일 결정
         id: d
         run: |
+          H=$(date +%H); H=${H#0}
           if [ -n "${{ inputs.date }}" ]; then D="${{ inputs.date }}"
-          elif [ "$(date +%H)" -lt 6 ]; then D=$(date -d yesterday +%F)
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            # 예약 실행은 모두 22:50~03:43 '저녁 회차'. GitHub 지연으로 다음 날 오전·오후에 돌아도
+            # 실행 시각이 아니라 예약된 저녁 기준으로 기준일을 정한다(18시 전이면 전날).
+            if [ "$H" -lt 18 ]; then D=$(date -d yesterday +%F); else D=$(date +%F); fi
+          elif [ "$H" -lt 6 ]; then D=$(date -d yesterday +%F)
           else D=$(date +%F); fi
           echo "date=$D" >> "$GITHUB_OUTPUT"
           echo "ymd=${D//-/}" >> "$GITHUB_OUTPUT"
-          if [ -f "data/groups/groups_$D.txt" ] && { [ "${{ github.event.schedule }}" = "25 14 * * *" ] || { [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" != "true" ]; }; }; then
+          if [ -f "data/groups/groups_$D.txt" ] && { { [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" != "50 13 * * *" ]; } || { [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" != "true" ]; }; }; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "$D 결과가 이미 있어 건너뜁니다." | tee -a "$GITHUB_STEP_SUMMARY"
           else
