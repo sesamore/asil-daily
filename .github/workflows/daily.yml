@@ -6,6 +6,10 @@ on:
     - cron: '25 14 * * *'   # 23:25 KST 재시도 (그날 결과가 있으면 건너뜀)
     - cron: '17 16 * * *'   # 01:17 KST 재시도 (전날 기준일, 결과가 있으면 건너뜀)
     - cron: '43 18 * * *'   # 03:43 KST 재시도 (전날 기준일, 결과가 있으면 건너뜀)
+  # 외부 예약(Claude 예약 작업)이 22:47 KST에 보내는 실행 신호. GitHub 예약 실행은
+  # 8~10시간씩 밀리는 일이 반복돼(11/22~11/25 기록) 본 실행을 이쪽으로 옮기고 cron은 예비로 둔다.
+  repository_dispatch:
+    types: [collect]
   workflow_dispatch:
     inputs:
       date:
@@ -37,16 +41,36 @@ jobs:
         id: d
         run: |
           H=$(date +%H); H=${H#0}
+          EV="${{ github.event_name }}"
           if [ -n "${{ inputs.date }}" ]; then D="${{ inputs.date }}"
-          elif [ "${{ github.event_name }}" = "schedule" ]; then
-            # 예약 실행은 모두 22:50~03:43 '저녁 회차'. GitHub 지연으로 다음 날 오전·오후에 돌아도
+          elif [ "$EV" = "schedule" ] || [ "$EV" = "repository_dispatch" ]; then
+            # 예약 실행은 모두 '저녁 회차'. 지연으로 다음 날 오전·오후에 돌아도
             # 실행 시각이 아니라 예약된 저녁 기준으로 기준일을 정한다(18시 전이면 전날).
             if [ "$H" -lt 18 ]; then D=$(date -d yesterday +%F); else D=$(date +%F); fi
           elif [ "$H" -lt 6 ]; then D=$(date -d yesterday +%F)
           else D=$(date +%F); fi
           echo "date=$D" >> "$GITHUB_OUTPUT"
           echo "ymd=${D//-/}" >> "$GITHUB_OUTPUT"
-          if [ -f "data/groups/groups_$D.txt" ] && { { [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" != "50 13 * * *" ]; } || { [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" != "true" ]; }; }; then
+
+          # 저녁 수집 완료 여부: data/stamps/D.txt의 수집 시각이 D일 18시 이후면 완료.
+          # 낮에 수동으로 받은 자료는 완료로 보지 않아 그날 저녁 회차가 덮어쓴다.
+          # 스탬프 도입 전(2026-11-25 이전) 날짜는 원자료만 있으면 완료로 본다.
+          DONE=false
+          if [ -f "data/groups/groups_$D.txt" ]; then
+            S="data/stamps/$D.txt"
+            if [ -f "$S" ]; then
+              [ "$(date -d "$(cat "$S")" +%s)" -ge "$(date -d "$D 18:00" +%s)" ] && DONE=true
+            elif [[ "$D" < "2026-11-25" ]]; then DONE=true; fi
+          fi
+          if [ "$EV" = "workflow_dispatch" ]; then
+            # 수동 실행: 원자료가 있으면 건너뜀(force면 덮어씀)
+            if [ -f "data/groups/groups_$D.txt" ] && [ "${{ inputs.force }}" != "true" ]; then SKIP=true; else SKIP=false; fi
+          else
+            # 예약·외부 신호: 저녁 수집이 이미 끝났으면 건너뜀. 늦게 도착한 cron이 저녁 자료를
+            # 다음 날 아침 자료로 덮어쓰는 일을 막는다.
+            SKIP=$DONE
+          fi
+          if [ "$SKIP" = "true" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "$D 결과가 이미 있어 건너뜁니다." | tee -a "$GITHUB_STEP_SUMMARY"
           else
@@ -72,6 +96,8 @@ jobs:
         run: |
           mkdir -p data/groups
           node collector/collect.mjs "data/groups/groups_${{ steps.d.outputs.date }}.txt"
+          mkdir -p data/stamps
+          date -Iseconds > "data/stamps/${{ steps.d.outputs.date }}.txt"
 
       - name: 엑셀·호가이력 빌드
         if: steps.d.outputs.skip == 'false'
